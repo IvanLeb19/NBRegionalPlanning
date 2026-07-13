@@ -49,7 +49,7 @@ conservative <- params$conservative   # FALSE = converged fits only, TRUE = fail
 
 ```{r params}
 param <- list(
-  n         = if (correlated) `n` else `n/2`,  # subjects; n paired == n/2 independent observations
+  n         = if (correlated) `n` else `n*2`,  # subjects; n paired == n*2 independent observations
   ratio     = ,      # allocation ratio between arms (independent engine only)
   ratio_cn  = ,      # allocation ratio inside the subpopulation
   pct       = ,    # subpopulation share of the total sample
