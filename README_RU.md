@@ -136,6 +136,6 @@ for (i in seq_len(nrow(grid))) {
    https://pmc.ncbi.nlm.nih.gov/articles/PMC11530476/
    Приложение: https://github.com/rsr-ss/RegionSizeR
 ## Файлы
-- `RegionSizeR_negbin_RR.Rmd` - сведённый отчёт.
+- `SampleSize_for_MRCT_negbin_reg.rmd` - сведённый отчёт.
 - `README.md` - английская версия.
 - `README.ru.md` - этот файл (русский).
