@@ -139,6 +139,6 @@ the conservative and non-conservative modes share identical draws.
    https://pmc.ncbi.nlm.nih.gov/articles/PMC11530476/
    App: https://github.com/rsr-ss/RegionSizeR
 ## Files
-- `RegionSizeR_negbin_RR.Rmd` - the merged report.
+- `SampleSize_for_MRCT_negbin_reg.rmd` - the merged report.
 - `README.md` - this file (English).
 - `README.ru.md` - Russian version.
