@@ -1,0 +1,423 @@
+---
+title: "Consistency sample size for negative binomial rate ratios"
+author: "Ivan Lebedev"
+date: "2026-04-16"
+output: html_document
+params:
+  correlated: false
+  conservative: true
+---
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(MASS)        # glm.nb, negative.binomial, confint
+library(simstudy)    # genCorGen (paired engine only)
+library(geeM)        # geem (paired engine only)
+library(tidyverse)   # data wrangling and display helpers
+library(flextable)   # results table
+library(tibble)
+library(purrr)
+```
+
+# Overview
+
+Regional sample size for a multi-regional trial (MRCT) under the ICH E17
+consistency framework, using the conservative Japanese criterion of preserving
+at least 50% of the overall treatment effect. The endpoint is an event rate
+modelled with a negative binomial distribution; the target of inference is the
+rate ratio (treatment vs control).
+
+Two switches control the run:
+
+- `correlated`  : `FALSE` fits two independent arms with `glm.nb`;
+                  `TRUE` fits a within-subject paired design (before/after)
+                  with a negative binomial GEE and robust standard errors.
+- `conservative`: `FALSE` uses the number of converged fits as the denominator;
+                  `TRUE` counts every non-converged fit as a study failure and
+                  uses the full number of simulations as the denominator.
+
+Set them in the chunk below, or knit with `params` from the YAML header.
+
+# Options 
+
+```{r options}
+correlated   <- params$correlated     # FALSE = independent arms, TRUE = paired GEE
+conservative <- params$conservative   # FALSE = converged fits only, TRUE = failures count
+```
+
+# Study parameters
+
+```{r params}
+param <- list(
+  n         = if (correlated) `n` else `n/2`,  # subjects; n paired == n/2 independent observations
+  ratio     = ,      # allocation ratio between arms (independent engine only)
+  ratio_cn  = ,      # allocation ratio inside the subpopulation
+  pct       = ,    # subpopulation share of the total sample
+  pct_in    = ,      # share of subpopulation subjects enrolled in the global trial
+  mean_trt  = ,   # mean rate under treatment
+  mean_ctrl = ,   # mean rate under control
+  nsim      = 1000,   # number of simulations
+  SigL      = 0.05,   # significance level
+  thd       = 0.5,    # consistency threshold (fraction of effect retained)
+  od_ctrl   = ,    # overdispersion Var(X)/mu, control
+  od_trt    = ,    # overdispersion Var(X)/mu, treatment
+  nim       = ,    # non-inferiority margin on the rate ratio scale
+  hma       = 1,      # hypothesis direction: 1 = higher is worse, 0 = better
+  rho       = ,   # within-subject correlation (paired engine only)
+  seed      = 12345
+)
+```
+
+# Sample-size layout
+
+```{r sample-size}
+# Independent two-arm design: subjects split into treatment and control.
+ss_independent <- function(param) {
+    n_chinese <- ceiling(param$n * param$pct)
+    n_cn_in   <- ceiling(n_chinese * param$pct_in)
+    n_noncn   <- param$n - n_cn_in
+    n_cn_out  <- n_chinese - n_cn_in
+
+    trt_pct <- param$ratio / (1 + param$ratio)
+    n_trt   <- ceiling(param$n * trt_pct)
+
+    trt_pct_cn   <- param$ratio_cn / (1 + param$ratio_cn)
+    n_cn_in_trt  <- ceiling(n_cn_in * trt_pct_cn)
+    n_cn_in_ctrl <- n_cn_in - n_cn_in_trt
+
+    n_noncn_trt  <- n_trt - n_cn_in_trt
+    n_noncn_ctrl <- n_noncn - n_noncn_trt
+
+    n_cn_out_trt  <- ceiling(n_cn_out * trt_pct)
+    n_cn_out_ctrl <- n_cn_out - n_cn_out_trt
+
+    list(
+        n_noncn_trt   = n_noncn_trt,
+        n_noncn_ctrl  = n_noncn_ctrl,
+        n_cn_in_trt   = n_cn_in_trt,
+        n_cn_in_ctrl  = n_cn_in_ctrl,
+        n_cn_out_trt  = n_cn_out_trt,
+        n_cn_out_ctrl = n_cn_out_ctrl,
+        n_chinese     = n_chinese,
+        n             = param$n
+    )
+}
+
+# Paired design: every subject contributes both periods, so no arm split.
+ss_paired <- function(param) {
+    n_chinese <- ceiling(param$n * param$pct)
+    n_cn_in   <- ceiling(n_chinese * param$pct_in)
+    n_noncn   <- param$n - n_cn_in
+    n_cn_out  <- n_chinese - n_cn_in
+
+    list(
+        n_noncn   = n_noncn,     # subjects outside the subpopulation
+        n_cn_in   = n_cn_in,     # subpopulation subjects inside the global trial
+        n_cn_out  = n_cn_out,    # subpopulation subjects outside the global trial
+        n_chinese = n_chinese,   # total subpopulation subjects
+        n         = param$n
+    )
+}
+
+ss <- function(param, correlated) {
+    if (correlated) ss_paired(param) else ss_independent(param)
+}
+```
+
+# Simulation engines
+
+```{r engine-independent}
+# One replicate of the independent two-arm engine.
+# Returns a list of metrics, or NULL if the fit did not produce usable estimates.
+simulate_independent <- function(ss, param) {
+    tryCatch({
+        suppressWarnings({
+
+        # Subjects outside the subpopulation
+        noncn_trt  <- rnbinom(ss$n_noncn_trt,  mu = param$mean_trt,
+                              size = param$mean_trt  / (param$od_trt  - 1))
+        noncn_ctrl <- rnbinom(ss$n_noncn_ctrl, mu = param$mean_ctrl,
+                              size = param$mean_ctrl / (param$od_ctrl - 1))
+
+        # Subpopulation subjects inside the global trial
+        cn_in_trt  <- rnbinom(ss$n_cn_in_trt,  mu = param$mean_trt,
+                              size = param$mean_trt  / (param$od_trt  - 1))
+        cn_in_ctrl <- rnbinom(ss$n_cn_in_ctrl, mu = param$mean_ctrl,
+                              size = param$mean_ctrl / (param$od_ctrl - 1))
+
+        global_trt  <- if (ss$n_cn_in_trt  == 0) noncn_trt  else c(noncn_trt,  cn_in_trt)
+        global_ctrl <- if (ss$n_cn_in_ctrl == 0) noncn_ctrl else c(noncn_ctrl, cn_in_ctrl)
+
+        global_df <- data.frame(
+            outcome = c(global_trt, global_ctrl),
+            group   = factor(c(rep("treatment", length(global_trt)),
+                               rep("control",   length(global_ctrl))))
+        )
+
+        all_model <- glm.nb(outcome ~ group, data = global_df, maxit = 100)
+        all_e     <- unname(all_model$coefficients[2])
+        all_ci_raw <- confint(all_model, level = 1 - param$SigL)
+        all_ci     <- data.frame(cl = all_ci_raw[, 1], cu = all_ci_raw[, 2])
+
+        # Subpopulation subjects outside the global trial
+        cn_out_trt  <- rnbinom(ss$n_cn_out_trt,  mu = param$mean_trt,
+                               size = param$mean_trt  / (param$od_trt  - 1))
+        cn_out_ctrl <- rnbinom(ss$n_cn_out_ctrl, mu = param$mean_ctrl,
+                               size = param$mean_ctrl / (param$od_ctrl - 1))
+
+        cn_trt  <- c(cn_in_trt,  cn_out_trt)
+        cn_ctrl <- c(cn_in_ctrl, cn_out_ctrl)
+
+        cn_df <- data.frame(
+            outcome = c(cn_trt, cn_ctrl),
+            group   = factor(c(rep("treatment", length(cn_trt)),
+                               rep("control",   length(cn_ctrl))))
+        )
+
+        cn_model <- glm.nb(outcome ~ group, data = cn_df, maxit = 100)
+        cn_e     <- unname(cn_model$coefficients[2])
+        cn_ci_raw <- confint(cn_model, level = 1 - param$SigL)
+        cn_ci     <- data.frame(cl = cn_ci_raw[, 1], cu = cn_ci_raw[, 2])
+
+        if (any(is.na(all_e)) || any(is.na(cn_e))) return(NULL)
+
+        RR_main <- exp(all_e)
+        RR_cn   <- exp(cn_e)
+        CU_main <- exp(all_ci$cu[2]); CL_main <- exp(all_ci$cl[2])
+        CU_cn   <- exp(cn_ci$cu[2]);  CL_cn   <- exp(cn_ci$cl[2])
+
+        if (any(is.na(c(CU_main, CL_main, CU_cn, CL_cn)))) return(NULL)
+
+        list(logRR_main = all_e, logRR_cn = cn_e,
+             RR_main = RR_main, RR_cn = RR_cn,
+             CU_main = CU_main, CL_main = CL_main,
+             CU_cn = CU_cn, CL_cn = CL_cn)
+
+        })
+    }, error = function(e) NULL)
+}
+```
+
+```{r engine-paired}
+# One replicate of the paired (repeated-measures) GEE engine.
+# genCorGen draws correlated before/after pairs; geem fits a negative binomial
+# GEE with an unstructured working correlation and robust (sandwich) SEs.
+simulate_paired <- function(ss, param) {
+
+    # simstudy negBinomial variance is mu + d * mu^2. Our target is Var = od * mu,
+    # which gives d = (od - 1) / mu.
+    disp_ctrl <- (param$od_ctrl - 1) / param$mean_ctrl
+    disp_trt  <- (param$od_trt  - 1) / param$mean_trt
+    z_alpha   <- qnorm(1 - param$SigL / 2)
+
+    gen_pairs <- function(n_subj) {
+        d <- genCorGen(
+            n = n_subj, nvars = 2,
+            params1 = c(param$mean_ctrl, param$mean_trt),
+            params2 = c(disp_ctrl, disp_trt),
+            dist = "negBinomial", rho = param$rho, corstr = "cs",
+            wide = FALSE, cnames = "outcome"
+        )
+        d$period <- d$period - 1   # 0 = control period, 1 = treatment period
+        d
+    }
+
+    fit_gee <- function(df) {
+        df <- as.data.frame(df)
+        df <- df[order(df$id), ]
+        theta_est <- tryCatch(glm.nb(outcome ~ factor(period), data = df)$theta,
+                              error = function(e) 2)  # fallback theta
+        model <- geem(outcome ~ period, id = id, data = df,
+                      family = negative.binomial(theta_est, link = "log"),
+                      corstr = "unstructured")
+        s <- summary(model)
+        list(e = s$beta[2], se = s$se.robust[2])
+    }
+
+    tryCatch({
+        suppressWarnings({
+
+        noncn_data <- if (ss$n_noncn > 0) gen_pairs(ss$n_noncn) else NULL
+
+        cn_in_data <- NULL
+        if (ss$n_cn_in > 0) {
+            cn_in_data <- gen_pairs(ss$n_cn_in)
+            max_id_noncn <- if (!is.null(noncn_data)) max(noncn_data$id) else 0
+            cn_in_data$id <- cn_in_data$id + max_id_noncn   # keep ids disjoint
+        }
+
+        global_df <- rbind(noncn_data, cn_in_data)
+
+        cn_out_data <- NULL
+        if (ss$n_cn_out > 0) {
+            cn_out_data <- gen_pairs(ss$n_cn_out)
+            max_id_cn_in <- if (!is.null(cn_in_data)) max(cn_in_data$id) else {
+                if (!is.null(noncn_data)) max(noncn_data$id) else 0
+            }
+            cn_out_data$id <- cn_out_data$id + max_id_cn_in
+        }
+
+        cn_df <- rbind(cn_in_data, cn_out_data)
+
+        g_fit <- fit_gee(global_df)
+        all_e <- g_fit$e; all_se <- g_fit$se
+        all_ci_lo <- all_e - z_alpha * all_se
+        all_ci_up <- all_e + z_alpha * all_se
+
+        c_fit <- fit_gee(cn_df)
+        cn_e <- c_fit$e; cn_se <- c_fit$se
+        cn_ci_lo <- cn_e - z_alpha * cn_se
+        cn_ci_up <- cn_e + z_alpha * cn_se
+
+        if (any(is.na(c(all_e, cn_e, all_se, cn_se)))) return(NULL)
+
+        RR_main <- exp(all_e)
+        RR_cn   <- exp(cn_e)
+        CU_main <- exp(all_ci_up); CL_main <- exp(all_ci_lo)
+        CU_cn   <- exp(cn_ci_up);  CL_cn   <- exp(cn_ci_lo)
+
+        if (any(is.na(c(CU_main, CL_main, CU_cn, CL_cn)))) return(NULL)
+
+        list(logRR_main = all_e, logRR_cn = cn_e,
+             RR_main = RR_main, RR_cn = RR_cn,
+             CU_main = CU_main, CL_main = CL_main,
+             CU_cn = CU_cn, CL_cn = CL_cn)
+
+        })
+    }, error = function(e) NULL)
+}
+```
+
+# Simulation driver
+ 
+```{r driver}
+SimuData <- function(ss, param, correlated) {
+    set.seed(param$seed)
+    one <- if (correlated) simulate_paired else simulate_independent
+
+    rr <- replicate(param$nsim, one(ss, param), simplify = FALSE)
+
+    successful   <- rr[!vapply(rr, is.null, logical(1))]
+    n_successful <- length(successful)
+    n_failed     <- param$nsim - n_successful
+
+    message(sprintf("Converged simulations: %d of %d (%.1f%%)",
+                    n_successful, param$nsim, 100 * n_successful / param$nsim))
+    if (n_failed > 0) {
+        message(sprintf("Non-converged simulations: %d", n_failed))
+    }
+
+    if (n_successful == 0) {
+        data_out <- data.frame(
+            logRR_main = numeric(0), logRR_cn = numeric(0),
+            RR_main = numeric(0), RR_cn = numeric(0),
+            CU_main = numeric(0), CL_main = numeric(0),
+            CU_cn = numeric(0), CL_cn = numeric(0)
+        )
+    } else {
+        data_out <- as.data.frame(do.call(rbind, lapply(successful, unlist)))
+    }
+
+    list(data = data_out, n_failed = n_failed)
+}
+```
+
+# Consistency probability 
+
+```{r consistency}
+# Consistency measures the fraction of the overall effect retained in the region.
+# On the log scale:  (logRR_cn - log(nim)) / (logRR_main - log(nim)).
+# On the rate-ratio scale: (1 - RR_cn/nim) / (1 - RR_main/nim).
+# A run is "consistent" when this fraction exceeds thd (0.5 for the Japanese rule).
+#
+# conditional_p keeps sum(cond_mask) in the denominator in both modes: it is
+# conditioned on a significant global test, and a non-converged fit cannot be a
+# global success, so it never enters that denominator. The conservative switch
+# only changes the unconditional and power denominators from converged fits to nsim.
+ConsistencyP <- function(param, correlated, conservative) {
+
+    ns  <- ss(param, correlated)
+    sim <- SimuData(ns, param, correlated)
+    res      <- sim$data
+    n_failed <- sim$n_failed
+    n_ok     <- nrow(res)
+
+    nim <- param$nim
+    thd <- param$thd
+    denom <- if (conservative) param$nsim else n_ok
+
+    if (n_ok == 0) {
+        out <- c(n_global = ns$n, n_chinese = ns$n_chinese,
+                 pct = param$pct * 100, pct_in = param$pct_in * 100,
+                 conditional_p = NA, unconditional_p = 0,
+                 cond_p_red = NA, uncond_p_red = 0,
+                 power_global = 0, power_cn = 0, threshold = thd)
+        if (conservative) out <- c(out, n_failed = n_failed)
+        return(out)
+    }
+
+    if (param$hma == 1) cond_mask <- res$CU_main < nim else cond_mask <- res$CL_main > nim
+
+    if (param$hma == 1) {
+        power_global <- round(sum(res$CU_main < nim) / denom, 3)
+        power_cn     <- round(sum(res$CU_cn   < nim) / denom, 3)
+    } else {
+        power_global <- round(sum(res$CL_main > nim) / denom, 3)
+        power_cn     <- round(sum(res$CL_cn   > nim) / denom, 3)
+    }
+
+    log_ratio <- (res$logRR_cn - log(nim)) / (res$logRR_main - log(nim))
+    conditional_p <- if (sum(cond_mask) > 0) {
+        round(sum(cond_mask & (log_ratio > thd)) / sum(cond_mask), 3)
+    } else NA
+    unconditional_p <- round(sum(log_ratio > thd) / denom, 3)
+
+    rr_ratio <- (1 - res$RR_cn / nim) / (1 - res$RR_main / nim)
+    cond_p_red <- if (sum(cond_mask) > 0) {
+        round(sum(cond_mask & (rr_ratio > thd)) / sum(cond_mask), 3)
+    } else NA
+    uncond_p_red <- round(sum(rr_ratio > thd) / denom, 3)
+
+    out <- c(n_global        = ns$n,
+             n_chinese       = ns$n_chinese,
+             pct             = param$pct * 100,
+             pct_in          = param$pct_in * 100,
+             conditional_p   = conditional_p,
+             unconditional_p = unconditional_p,
+             cond_p_red      = cond_p_red,
+             uncond_p_red    = uncond_p_red,
+             power_global    = power_global,
+             power_cn        = power_cn,
+             threshold       = thd)
+    if (conservative) out <- c(out, n_failed = n_failed)
+    out
+}
+```
+
+# Result 
+
+```{r result}
+results <- ConsistencyP(param, correlated, conservative)
+
+labels <- c(
+    n_global        = "N, subjects (global)",
+    n_chinese       = "n, subjects (subpopulation)",
+    pct             = "Subpopulation share, %",
+    pct_in          = "Subpopulation share in MRCT, %",
+    conditional_p   = "Conditional probability (log scale)",
+    unconditional_p = "Unconditional probability (log scale)",
+    cond_p_red      = "Conditional probability (RR scale)",
+    uncond_p_red    = "Unconditional probability (RR scale)",
+    power_global    = "Power (global)",
+    power_cn        = "Power (subpopulation)",
+    threshold       = "Consistency threshold",
+    n_failed        = "Non-converged simulations"
+)
+
+results %>%
+    enframe(name = "Parameter", value = "Value") %>%
+    mutate(Parameter = recode(Parameter, !!!labels)) %>%
+    flextable() %>%
+    autofit(
+) 
+```
