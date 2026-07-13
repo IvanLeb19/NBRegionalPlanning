@@ -1,7 +1,7 @@
 # NBRegionalPlanning
 Simulation tool for regional sample size planning and treatment effect consistency assessment in MRCTs under negative binomial models.
 # RegionSizeR (negative binomial, rate ratio)
-English | [Русский](README.ru.md)
+English | [Русский]([README.ru.md](https://github.com/IvanLeb19/NBRegionalPlanning/blob/main/README_RU.md))
 
 Simulation tool for planning the regional sample size of a multi-regional
 clinical trial (MRCT) and estimating the probability of demonstrating
