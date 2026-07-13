@@ -1,6 +1,8 @@
 # NBRegionalPlanning
 Simulation tool for regional sample size planning and treatment effect consistency assessment in MRCTs under negative binomial models.
 # RegionSizeR (negative binomial, rate ratio)
+English | [Русский](README.ru.md)
+
 Simulation tool for planning the regional sample size of a multi-regional
 clinical trial (MRCT) and estimating the probability of demonstrating
 consistency of the treatment effect in a region of interest. The endpoint is an
@@ -114,9 +116,7 @@ Set in the `params` chunk.
 | `n_failed`        | Non-converged simulations (conservative mode only).           |
 ## Reproducibility
 The seed is fixed inside the simulation driver, so results are reproducible across
-runs. The merged report was verified against the original files: with matching
-switches and parameters the independent mode reproduces the per-file results
-exactly, checked field by field. The `conservative` switch changes only
+runs. The `conservative` switch changes only
 post-processing (the denominator), so it does not alter the simulated data, and
 the conservative and non-conservative modes share identical draws.
 ## References
