@@ -141,4 +141,4 @@ the conservative and non-conservative modes share identical draws.
 ## Files
 - `SampleSize_for_MRCT_negbin_reg.rmd` - the merged report.
 - `README.md` - this file (English).
-- `README.ru.md` - Russian version.
+- `README_RU.md` - Russian version.
