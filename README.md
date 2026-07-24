@@ -39,10 +39,10 @@ where `_cn` denotes the region of interest, `_main` the overall population, and
 fraction exceeds the threshold `thd` (0.5 for the Japanese rule).
 ## Two analysis modes
 - **`correlated`** selects the model. `FALSE` treats the two measurements as
-  independent arms and fits `glm.nb` with a profile-likelihood confidence
-  interval. `TRUE` treats them as a within-subject pair and fits a negative
-  binomial GEE (`geeM`) with an unstructured working correlation and robust
-  (sandwich) standard errors on a Wald interval.
+  independent arms and fits `glm.nb` with a Wald confidence interval
+  (estimate ± z·SE). `TRUE` treats them as a within-subject pair and fits a
+  negative binomial GEE (`geeM`) with an unstructured working correlation and
+  robust (sandwich) standard errors, also on a Wald interval.
 - **`conservative`** selects the denominator. `FALSE` divides by the number of
   converged fits. `TRUE` counts every non-converged fit as a study failure,
   divides by the full number of simulations, and reports the failure count.
@@ -55,16 +55,24 @@ install.packages(c("MASS", "simstudy", "geeM", "tidyverse", "flextable"))
 needed for the paired (`correlated = TRUE`) mode. `tidyverse` and `flextable` are
 used for the results table.
 ## Usage
-Open `RegionSizeR_negbin_RR.Rmd` and set the two switches in the `options` chunk:
+Open `SampleSize_for_MRCT_negbin_reg.rmd` and set the two switches in the
+`options` chunk:
 ```r
 correlated   <- FALSE   # FALSE = independent arms, TRUE = paired GEE
 conservative <- FALSE   # FALSE = converged fits only, TRUE = failures count
 ```
+The `params` chunk ships with example values (allocation ratios, region share,
+event rates, overdispersion, margin, correlation) so the report knits
+out of the box - replace them with the actual study assumptions before using
+the output for real planning. A `param-checks` chunk right after it validates
+the basics (e.g. `od_ctrl`/`od_trt` > 1, `pct`/`pct_in` in (0, 1]) and stops with
+a message if a value is out of range.
+
 Then knit to HTML. One run produces one results table.
 To run without editing the file, knit with parameters:
 ```r
 rmarkdown::render(
-  "RegionSizeR_negbin_RR.Rmd",
+  "SampleSize_for_MRCT_negbin_reg.rmd",
   params = list(correlated = TRUE, conservative = TRUE)
 )
 ```
@@ -73,7 +81,7 @@ To sweep all four combinations:
 grid <- expand.grid(correlated = c(FALSE, TRUE), conservative = c(FALSE, TRUE))
 for (i in seq_len(nrow(grid))) {
   rmarkdown::render(
-    "RegionSizeR_negbin_RR.Rmd",
+    "SampleSize_for_MRCT_negbin_reg.rmd",
     params = list(correlated = grid$correlated[i],
                   conservative = grid$conservative[i]),
     output_file = sprintf("result_%d.html", i)
@@ -84,9 +92,9 @@ for (i in seq_len(nrow(grid))) {
 Set in the `params` chunk.
 | Parameter   | Meaning                                                            |
 |-------------|-------------------------------------------------------------------|
-| `n`         | Subjects. 58 for the independent mode, 29 for the paired mode (both are 58 observations). Set automatically from `correlated`. |
+| `n`         | Subjects. Derived from `n_base` (an example value of 29 ships with the script): 58 for the independent mode, 29 for the paired mode (both are 58 observations). Set automatically from `correlated`. |
 | `ratio`     | Allocation ratio between arms (independent mode only).            |
-| `ratio_cn`  | Allocation ratio inside the region of interest.                   |
+| `ratio_region` | Allocation ratio inside the region of interest.                |
 | `pct`       | Region-of-interest share of the total sample.                     |
 | `pct_in`    | Share of region subjects enrolled in the global trial.            |
 | `mean_trt`  | Mean event rate under treatment.                                  |
@@ -104,14 +112,14 @@ Set in the `params` chunk.
 | Field             | Meaning                                                       |
 |-------------------|---------------------------------------------------------------|
 | `n_global`        | Global sample size.                                           |
-| `n_chinese`       | Region-of-interest sample size.                               |
+| `n_region`        | Region-of-interest sample size.                               |
 | `pct`, `pct_in`   | Region shares, in percent.                                    |
 | `conditional_p`   | Consistency probability (log scale), conditional on a significant global test. |
 | `unconditional_p` | Consistency probability (log scale), unconditional.           |
 | `cond_p_red`      | As `conditional_p`, on the rate-ratio scale.                  |
 | `uncond_p_red`    | As `unconditional_p`, on the rate-ratio scale.                |
 | `power_global`    | Probability the global non-inferiority test is significant.   |
-| `power_cn`        | The same, restricted to the region.                           |
+| `power_region`    | The same, restricted to the region.                           |
 | `threshold`       | Consistency threshold used.                                   |
 | `n_failed`        | Non-converged simulations (conservative mode only).           |
 ## Reproducibility
