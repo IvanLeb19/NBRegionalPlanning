@@ -1,7 +1,7 @@
 ---
 title: "Consistency sample size for negative binomial rate ratios"
-author: "Ivan Lebedev"
-date: "2026-04-16"
+author: "Name"
+date: "YYYY-MM-DD"
 output: html_document
 params:
   correlated: false
@@ -10,7 +10,7 @@ params:
  
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
-library(MASS)        # glm.nb, negative.binomial, confint
+library(MASS)        # glm.nb, negative.binomial
 library(simstudy)    # genCorGen (paired engine only)
 library(geeM)        # geem (paired engine only)
 library(tidyverse)   # data wrangling and display helpers
@@ -38,6 +38,11 @@ Two switches control the run:
 
 Set them in the chunk below, or knit with `params` from the YAML header.
 
+Confidence intervals in both engines are Wald intervals (estimate +/- z * robust
+SE), not profile-likelihood intervals. This is consistent across the two engines
+and much faster over `nsim` replicates; profile likelihood is unnecessary
+precision for a Monte Carlo sample-size search.
+
 # Options 
 
 ```{r options}
@@ -48,23 +53,50 @@ conservative <- params$conservative   # FALSE = converged fits only, TRUE = fail
 # Study parameters
 
 ```{r params}
+# Base subject count that `n` is derived from. Paired subjects contribute two
+# observations each, so `n_base` paired subjects carry the same number of
+# observations as `n_base * 2` independent subjects; the two designs are put on
+# a comparable observation count by scaling n_base this way.
+# EXAMPLE VALUE - replace with the actual planned/assumed study size.
+n_base <- 29
+
 param <- list(
-  n         = if (correlated) `n` else `n*2`,  # subjects; n paired == n*2 independent observations
-  ratio     = ,      # allocation ratio between arms (independent engine only)
-  ratio_cn  = ,      # allocation ratio inside the subpopulation
-  pct       = ,    # subpopulation share of the total sample
-  pct_in    = ,      # share of subpopulation subjects enrolled in the global trial
-  mean_trt  = ,   # mean rate under treatment
-  mean_ctrl = ,   # mean rate under control
-  nsim      = 1000,   # number of simulations
-  SigL      = 0.05,   # significance level
-  thd       = 0.5,    # consistency threshold (fraction of effect retained)
-  od_ctrl   = ,    # overdispersion Var(X)/mu, control
-  od_trt    = ,    # overdispersion Var(X)/mu, treatment
-  nim       = ,    # non-inferiority margin on the rate ratio scale
-  hma       = 1,      # hypothesis direction: 1 = higher is worse, 0 = better
-  rho       = ,   # within-subject correlation (paired engine only)
-  seed      = 12345
+    n            = if (correlated) n_base else n_base * 2,  # subjects (see n_base comment above)
+    ratio        = 1,      # allocation ratio between arms (independent engine only) - EXAMPLE, replace
+    ratio_region = 1,      # allocation ratio inside the region of interest - EXAMPLE, replace
+    pct          = 0.3,    # region-of-interest share of the total sample - EXAMPLE, replace
+    pct_in       = 0.7,    # share of region-of-interest subjects enrolled in the global trial - EXAMPLE, replace
+    mean_trt     = 0.5,    # mean rate under treatment - EXAMPLE, replace
+    mean_ctrl    = 1.0,    # mean rate under control - EXAMPLE, replace
+    nsim         = 1000,   # number of simulations
+    SigL         = 0.05,   # significance level
+    thd          = 0.5,    # consistency threshold (fraction of effect retained)
+    od_ctrl      = 1.5,    # overdispersion Var(X)/mu, control - EXAMPLE, replace. Must be > 1.
+    od_trt       = 1.5,    # overdispersion Var(X)/mu, treatment - EXAMPLE, replace. Must be > 1.
+    nim          = 1.25,   # non-inferiority margin on the rate ratio scale - EXAMPLE, replace
+    hma          = 1,      # hypothesis direction: 1 = higher is worse, 0 = better
+    rho          = 0.3,    # within-subject correlation (paired engine only) - EXAMPLE, replace
+    seed         = 12345
+)
+```
+
+```{r param-checks}
+# Basic sanity checks on the parameters above. These catch silent
+# mis-specification (e.g. overdispersion <= 1, which would hand rnbinom() a
+# negative `size`) up front, rather than letting every one of nsim replicates
+# fail quietly inside simulate_independent()/simulate_paired().
+stopifnot(
+    "od_ctrl must be > 1 (equi/under-dispersion is not a negative binomial)" = param$od_ctrl > 1,
+    "od_trt must be > 1 (equi/under-dispersion is not a negative binomial)"  = param$od_trt  > 1,
+    "pct must be in (0, 1]"            = param$pct > 0 && param$pct <= 1,
+    "pct_in must be in (0, 1]"         = param$pct_in > 0 && param$pct_in <= 1,
+    "ratio must be > 0"                = param$ratio > 0,
+    "ratio_region must be > 0"         = param$ratio_region > 0,
+    "mean_trt must be > 0"             = param$mean_trt > 0,
+    "mean_ctrl must be > 0"            = param$mean_ctrl > 0,
+    "nsim must be a positive integer"  = param$nsim > 0 && param$nsim == round(param$nsim),
+    "thd must be in (0, 1)"            = param$thd > 0 && param$thd < 1,
+    "SigL must be in (0, 1)"           = param$SigL > 0 && param$SigL < 1
 )
 ```
 
@@ -73,49 +105,49 @@ param <- list(
 ```{r sample-size}
 # Independent two-arm design: subjects split into treatment and control.
 ss_independent <- function(param) {
-    n_chinese <- ceiling(param$n * param$pct)
-    n_cn_in   <- ceiling(n_chinese * param$pct_in)
-    n_noncn   <- param$n - n_cn_in
-    n_cn_out  <- n_chinese - n_cn_in
+    n_region     <- ceiling(param$n * param$pct)
+    n_region_in  <- ceiling(n_region * param$pct_in)
+    n_nonregion  <- param$n - n_region_in
+    n_region_out <- n_region - n_region_in
 
     trt_pct <- param$ratio / (1 + param$ratio)
     n_trt   <- ceiling(param$n * trt_pct)
 
-    trt_pct_cn   <- param$ratio_cn / (1 + param$ratio_cn)
-    n_cn_in_trt  <- ceiling(n_cn_in * trt_pct_cn)
-    n_cn_in_ctrl <- n_cn_in - n_cn_in_trt
+    trt_pct_region   <- param$ratio_region / (1 + param$ratio_region)
+    n_region_in_trt  <- ceiling(n_region_in * trt_pct_region)
+    n_region_in_ctrl <- n_region_in - n_region_in_trt
 
-    n_noncn_trt  <- n_trt - n_cn_in_trt
-    n_noncn_ctrl <- n_noncn - n_noncn_trt
+    n_nonregion_trt  <- n_trt - n_region_in_trt
+    n_nonregion_ctrl <- n_nonregion - n_nonregion_trt
 
-    n_cn_out_trt  <- ceiling(n_cn_out * trt_pct)
-    n_cn_out_ctrl <- n_cn_out - n_cn_out_trt
+    n_region_out_trt  <- ceiling(n_region_out * trt_pct)
+    n_region_out_ctrl <- n_region_out - n_region_out_trt
 
     list(
-        n_noncn_trt   = n_noncn_trt,
-        n_noncn_ctrl  = n_noncn_ctrl,
-        n_cn_in_trt   = n_cn_in_trt,
-        n_cn_in_ctrl  = n_cn_in_ctrl,
-        n_cn_out_trt  = n_cn_out_trt,
-        n_cn_out_ctrl = n_cn_out_ctrl,
-        n_chinese     = n_chinese,
-        n             = param$n
+        n_nonregion_trt   = n_nonregion_trt,
+        n_nonregion_ctrl  = n_nonregion_ctrl,
+        n_region_in_trt   = n_region_in_trt,
+        n_region_in_ctrl  = n_region_in_ctrl,
+        n_region_out_trt  = n_region_out_trt,
+        n_region_out_ctrl = n_region_out_ctrl,
+        n_region          = n_region,
+        n                 = param$n
     )
 }
 
 # Paired design: every subject contributes both periods, so no arm split.
 ss_paired <- function(param) {
-    n_chinese <- ceiling(param$n * param$pct)
-    n_cn_in   <- ceiling(n_chinese * param$pct_in)
-    n_noncn   <- param$n - n_cn_in
-    n_cn_out  <- n_chinese - n_cn_in
+    n_region     <- ceiling(param$n * param$pct)
+    n_region_in  <- ceiling(n_region * param$pct_in)
+    n_nonregion  <- param$n - n_region_in
+    n_region_out <- n_region - n_region_in
 
     list(
-        n_noncn   = n_noncn,     # subjects outside the subpopulation
-        n_cn_in   = n_cn_in,     # subpopulation subjects inside the global trial
-        n_cn_out  = n_cn_out,    # subpopulation subjects outside the global trial
-        n_chinese = n_chinese,   # total subpopulation subjects
-        n         = param$n
+        n_nonregion  = n_nonregion,   # subjects outside the region of interest
+        n_region_in  = n_region_in,   # region-of-interest subjects inside the global trial
+        n_region_out = n_region_out,  # region-of-interest subjects outside the global trial
+        n_region     = n_region,      # total region-of-interest subjects
+        n            = param$n
     )
 }
 
@@ -129,24 +161,29 @@ ss <- function(param, correlated) {
 ```{r engine-independent}
 # One replicate of the independent two-arm engine.
 # Returns a list of metrics, or NULL if the fit did not produce usable estimates.
+# Confidence intervals are Wald (estimate +/- z * SE), not profile-likelihood -
+# this matches the paired engine and avoids the cost of MASS::confint.glm.nb()
+# repeated over nsim replicates.
 simulate_independent <- function(ss, param) {
     tryCatch({
         suppressWarnings({
 
-        # Subjects outside the subpopulation
-        noncn_trt  <- rnbinom(ss$n_noncn_trt,  mu = param$mean_trt,
+        z_alpha <- qnorm(1 - param$SigL / 2)
+
+        # Subjects outside the region of interest
+        nonregion_trt  <- rnbinom(ss$n_nonregion_trt,  mu = param$mean_trt,
                               size = param$mean_trt  / (param$od_trt  - 1))
-        noncn_ctrl <- rnbinom(ss$n_noncn_ctrl, mu = param$mean_ctrl,
+        nonregion_ctrl <- rnbinom(ss$n_nonregion_ctrl, mu = param$mean_ctrl,
                               size = param$mean_ctrl / (param$od_ctrl - 1))
 
-        # Subpopulation subjects inside the global trial
-        cn_in_trt  <- rnbinom(ss$n_cn_in_trt,  mu = param$mean_trt,
+        # Region-of-interest subjects inside the global trial
+        region_in_trt  <- rnbinom(ss$n_region_in_trt,  mu = param$mean_trt,
                               size = param$mean_trt  / (param$od_trt  - 1))
-        cn_in_ctrl <- rnbinom(ss$n_cn_in_ctrl, mu = param$mean_ctrl,
+        region_in_ctrl <- rnbinom(ss$n_region_in_ctrl, mu = param$mean_ctrl,
                               size = param$mean_ctrl / (param$od_ctrl - 1))
 
-        global_trt  <- if (ss$n_cn_in_trt  == 0) noncn_trt  else c(noncn_trt,  cn_in_trt)
-        global_ctrl <- if (ss$n_cn_in_ctrl == 0) noncn_ctrl else c(noncn_ctrl, cn_in_ctrl)
+        global_trt  <- if (ss$n_region_in_trt  == 0) nonregion_trt  else c(nonregion_trt,  region_in_trt)
+        global_ctrl <- if (ss$n_region_in_ctrl == 0) nonregion_ctrl else c(nonregion_ctrl, region_in_ctrl)
 
         global_df <- data.frame(
             outcome = c(global_trt, global_ctrl),
@@ -155,43 +192,47 @@ simulate_independent <- function(ss, param) {
         )
 
         all_model <- glm.nb(outcome ~ group, data = global_df, maxit = 100)
-        all_e     <- unname(all_model$coefficients[2])
-        all_ci_raw <- confint(all_model, level = 1 - param$SigL)
-        all_ci     <- data.frame(cl = all_ci_raw[, 1], cu = all_ci_raw[, 2])
+        all_coef  <- summary(all_model)$coefficients
+        all_e     <- unname(all_coef[2, "Estimate"])
+        all_se    <- unname(all_coef[2, "Std. Error"])
+        all_ci_lo <- all_e - z_alpha * all_se
+        all_ci_up <- all_e + z_alpha * all_se
 
-        # Subpopulation subjects outside the global trial
-        cn_out_trt  <- rnbinom(ss$n_cn_out_trt,  mu = param$mean_trt,
+        # Region-of-interest subjects outside the global trial
+        region_out_trt  <- rnbinom(ss$n_region_out_trt,  mu = param$mean_trt,
                                size = param$mean_trt  / (param$od_trt  - 1))
-        cn_out_ctrl <- rnbinom(ss$n_cn_out_ctrl, mu = param$mean_ctrl,
+        region_out_ctrl <- rnbinom(ss$n_region_out_ctrl, mu = param$mean_ctrl,
                                size = param$mean_ctrl / (param$od_ctrl - 1))
 
-        cn_trt  <- c(cn_in_trt,  cn_out_trt)
-        cn_ctrl <- c(cn_in_ctrl, cn_out_ctrl)
+        region_trt  <- c(region_in_trt,  region_out_trt)
+        region_ctrl <- c(region_in_ctrl, region_out_ctrl)
 
-        cn_df <- data.frame(
-            outcome = c(cn_trt, cn_ctrl),
-            group   = factor(c(rep("treatment", length(cn_trt)),
-                               rep("control",   length(cn_ctrl))))
+        region_df <- data.frame(
+            outcome = c(region_trt, region_ctrl),
+            group   = factor(c(rep("treatment", length(region_trt)),
+                               rep("control",   length(region_ctrl))))
         )
 
-        cn_model <- glm.nb(outcome ~ group, data = cn_df, maxit = 100)
-        cn_e     <- unname(cn_model$coefficients[2])
-        cn_ci_raw <- confint(cn_model, level = 1 - param$SigL)
-        cn_ci     <- data.frame(cl = cn_ci_raw[, 1], cu = cn_ci_raw[, 2])
+        region_model <- glm.nb(outcome ~ group, data = region_df, maxit = 100)
+        region_coef  <- summary(region_model)$coefficients
+        region_e     <- unname(region_coef[2, "Estimate"])
+        region_se    <- unname(region_coef[2, "Std. Error"])
+        region_ci_lo <- region_e - z_alpha * region_se
+        region_ci_up <- region_e + z_alpha * region_se
 
-        if (any(is.na(all_e)) || any(is.na(cn_e))) return(NULL)
+        if (any(is.na(c(all_e, region_e, all_se, region_se)))) return(NULL)
 
-        RR_main <- exp(all_e)
-        RR_cn   <- exp(cn_e)
-        CU_main <- exp(all_ci$cu[2]); CL_main <- exp(all_ci$cl[2])
-        CU_cn   <- exp(cn_ci$cu[2]);  CL_cn   <- exp(cn_ci$cl[2])
+        RR_main   <- exp(all_e)
+        RR_region <- exp(region_e)
+        CU_main   <- exp(all_ci_up);    CL_main   <- exp(all_ci_lo)
+        CU_region <- exp(region_ci_up); CL_region <- exp(region_ci_lo)
 
-        if (any(is.na(c(CU_main, CL_main, CU_cn, CL_cn)))) return(NULL)
+        if (any(is.na(c(CU_main, CL_main, CU_region, CL_region)))) return(NULL)
 
-        list(logRR_main = all_e, logRR_cn = cn_e,
-             RR_main = RR_main, RR_cn = RR_cn,
+        list(logRR_main = all_e, logRR_region = region_e,
+             RR_main = RR_main, RR_region = RR_region,
              CU_main = CU_main, CL_main = CL_main,
-             CU_cn = CU_cn, CL_cn = CL_cn)
+             CU_region = CU_region, CL_region = CL_region)
 
         })
     }, error = function(e) NULL)
@@ -222,6 +263,10 @@ simulate_paired <- function(ss, param) {
         d
     }
 
+    # NOTE: theta is estimated once via glm.nb() on the marginal (correlation-
+    # ignoring) data and then plugged into geem() as a fixed dispersion. This is
+    # a deliberate, unchanged modelling choice (geeM has no native negative
+    # binomial family with its own theta estimation) - left as-is per review.
     fit_gee <- function(df) {
         df <- as.data.frame(df)
         df <- df[order(df$id), ]
@@ -237,51 +282,51 @@ simulate_paired <- function(ss, param) {
     tryCatch({
         suppressWarnings({
 
-        noncn_data <- if (ss$n_noncn > 0) gen_pairs(ss$n_noncn) else NULL
+        nonregion_data <- if (ss$n_nonregion > 0) gen_pairs(ss$n_nonregion) else NULL
 
-        cn_in_data <- NULL
-        if (ss$n_cn_in > 0) {
-            cn_in_data <- gen_pairs(ss$n_cn_in)
-            max_id_noncn <- if (!is.null(noncn_data)) max(noncn_data$id) else 0
-            cn_in_data$id <- cn_in_data$id + max_id_noncn   # keep ids disjoint
+        region_in_data <- NULL
+        if (ss$n_region_in > 0) {
+            region_in_data <- gen_pairs(ss$n_region_in)
+            max_id_nonregion <- if (!is.null(nonregion_data)) max(nonregion_data$id) else 0
+            region_in_data$id <- region_in_data$id + max_id_nonregion   # keep ids disjoint
         }
 
-        global_df <- rbind(noncn_data, cn_in_data)
+        global_df <- rbind(nonregion_data, region_in_data)
 
-        cn_out_data <- NULL
-        if (ss$n_cn_out > 0) {
-            cn_out_data <- gen_pairs(ss$n_cn_out)
-            max_id_cn_in <- if (!is.null(cn_in_data)) max(cn_in_data$id) else {
-                if (!is.null(noncn_data)) max(noncn_data$id) else 0
+        region_out_data <- NULL
+        if (ss$n_region_out > 0) {
+            region_out_data <- gen_pairs(ss$n_region_out)
+            max_id_region_in <- if (!is.null(region_in_data)) max(region_in_data$id) else {
+                if (!is.null(nonregion_data)) max(nonregion_data$id) else 0
             }
-            cn_out_data$id <- cn_out_data$id + max_id_cn_in
+            region_out_data$id <- region_out_data$id + max_id_region_in
         }
 
-        cn_df <- rbind(cn_in_data, cn_out_data)
+        region_df <- rbind(region_in_data, region_out_data)
 
         g_fit <- fit_gee(global_df)
         all_e <- g_fit$e; all_se <- g_fit$se
         all_ci_lo <- all_e - z_alpha * all_se
         all_ci_up <- all_e + z_alpha * all_se
 
-        c_fit <- fit_gee(cn_df)
-        cn_e <- c_fit$e; cn_se <- c_fit$se
-        cn_ci_lo <- cn_e - z_alpha * cn_se
-        cn_ci_up <- cn_e + z_alpha * cn_se
+        r_fit <- fit_gee(region_df)
+        region_e <- r_fit$e; region_se <- r_fit$se
+        region_ci_lo <- region_e - z_alpha * region_se
+        region_ci_up <- region_e + z_alpha * region_se
 
-        if (any(is.na(c(all_e, cn_e, all_se, cn_se)))) return(NULL)
+        if (any(is.na(c(all_e, region_e, all_se, region_se)))) return(NULL)
 
-        RR_main <- exp(all_e)
-        RR_cn   <- exp(cn_e)
-        CU_main <- exp(all_ci_up); CL_main <- exp(all_ci_lo)
-        CU_cn   <- exp(cn_ci_up);  CL_cn   <- exp(cn_ci_lo)
+        RR_main   <- exp(all_e)
+        RR_region <- exp(region_e)
+        CU_main   <- exp(all_ci_up);    CL_main   <- exp(all_ci_lo)
+        CU_region <- exp(region_ci_up); CL_region <- exp(region_ci_lo)
 
-        if (any(is.na(c(CU_main, CL_main, CU_cn, CL_cn)))) return(NULL)
+        if (any(is.na(c(CU_main, CL_main, CU_region, CL_region)))) return(NULL)
 
-        list(logRR_main = all_e, logRR_cn = cn_e,
-             RR_main = RR_main, RR_cn = RR_cn,
+        list(logRR_main = all_e, logRR_region = region_e,
+             RR_main = RR_main, RR_region = RR_region,
              CU_main = CU_main, CL_main = CL_main,
-             CU_cn = CU_cn, CL_cn = CL_cn)
+             CU_region = CU_region, CL_region = CL_region)
 
         })
     }, error = function(e) NULL)
@@ -309,10 +354,10 @@ SimuData <- function(ss, param, correlated) {
 
     if (n_successful == 0) {
         data_out <- data.frame(
-            logRR_main = numeric(0), logRR_cn = numeric(0),
-            RR_main = numeric(0), RR_cn = numeric(0),
+            logRR_main = numeric(0), logRR_region = numeric(0),
+            RR_main = numeric(0), RR_region = numeric(0),
             CU_main = numeric(0), CL_main = numeric(0),
-            CU_cn = numeric(0), CL_cn = numeric(0)
+            CU_region = numeric(0), CL_region = numeric(0)
         )
     } else {
         data_out <- as.data.frame(do.call(rbind, lapply(successful, unlist)))
@@ -326,8 +371,8 @@ SimuData <- function(ss, param, correlated) {
 
 ```{r consistency}
 # Consistency measures the fraction of the overall effect retained in the region.
-# On the log scale:  (logRR_cn - log(nim)) / (logRR_main - log(nim)).
-# On the rate-ratio scale: (1 - RR_cn/nim) / (1 - RR_main/nim).
+# On the log scale:  (logRR_region - log(nim)) / (logRR_main - log(nim)).
+# On the rate-ratio scale: (1 - RR_region/nim) / (1 - RR_main/nim).
 # A run is "consistent" when this fraction exceeds thd (0.5 for the Japanese rule).
 #
 # conditional_p keeps sum(cond_mask) in the denominator in both modes: it is
@@ -347,11 +392,11 @@ ConsistencyP <- function(param, correlated, conservative) {
     denom <- if (conservative) param$nsim else n_ok
 
     if (n_ok == 0) {
-        out <- c(n_global = ns$n, n_chinese = ns$n_chinese,
+        out <- c(n_global = ns$n, n_region = ns$n_region,
                  pct = param$pct * 100, pct_in = param$pct_in * 100,
                  conditional_p = NA, unconditional_p = 0,
                  cond_p_red = NA, uncond_p_red = 0,
-                 power_global = 0, power_cn = 0, threshold = thd)
+                 power_global = 0, power_region = 0, threshold = thd)
         if (conservative) out <- c(out, n_failed = n_failed)
         return(out)
     }
@@ -359,27 +404,27 @@ ConsistencyP <- function(param, correlated, conservative) {
     if (param$hma == 1) cond_mask <- res$CU_main < nim else cond_mask <- res$CL_main > nim
 
     if (param$hma == 1) {
-        power_global <- round(sum(res$CU_main < nim) / denom, 3)
-        power_cn     <- round(sum(res$CU_cn   < nim) / denom, 3)
+        power_global <- round(sum(res$CU_main   < nim) / denom, 3)
+        power_region <- round(sum(res$CU_region < nim) / denom, 3)
     } else {
-        power_global <- round(sum(res$CL_main > nim) / denom, 3)
-        power_cn     <- round(sum(res$CL_cn   > nim) / denom, 3)
+        power_global <- round(sum(res$CL_main   > nim) / denom, 3)
+        power_region <- round(sum(res$CL_region > nim) / denom, 3)
     }
 
-    log_ratio <- (res$logRR_cn - log(nim)) / (res$logRR_main - log(nim))
+    log_ratio <- (res$logRR_region - log(nim)) / (res$logRR_main - log(nim))
     conditional_p <- if (sum(cond_mask) > 0) {
         round(sum(cond_mask & (log_ratio > thd)) / sum(cond_mask), 3)
     } else NA
     unconditional_p <- round(sum(log_ratio > thd) / denom, 3)
 
-    rr_ratio <- (1 - res$RR_cn / nim) / (1 - res$RR_main / nim)
+    rr_ratio <- (1 - res$RR_region / nim) / (1 - res$RR_main / nim)
     cond_p_red <- if (sum(cond_mask) > 0) {
         round(sum(cond_mask & (rr_ratio > thd)) / sum(cond_mask), 3)
     } else NA
     uncond_p_red <- round(sum(rr_ratio > thd) / denom, 3)
 
     out <- c(n_global        = ns$n,
-             n_chinese       = ns$n_chinese,
+             n_region        = ns$n_region,
              pct             = param$pct * 100,
              pct_in          = param$pct_in * 100,
              conditional_p   = conditional_p,
@@ -387,7 +432,7 @@ ConsistencyP <- function(param, correlated, conservative) {
              cond_p_red      = cond_p_red,
              uncond_p_red    = uncond_p_red,
              power_global    = power_global,
-             power_cn        = power_cn,
+             power_region    = power_region,
              threshold       = thd)
     if (conservative) out <- c(out, n_failed = n_failed)
     out
@@ -401,15 +446,15 @@ results <- ConsistencyP(param, correlated, conservative)
 
 labels <- c(
     n_global        = "N, subjects (global)",
-    n_chinese       = "n, subjects (subpopulation)",
-    pct             = "Subpopulation share, %",
-    pct_in          = "Subpopulation share in MRCT, %",
+    n_region        = "n, subjects (region of interest)",
+    pct             = "Region-of-interest share, %",
+    pct_in          = "Region-of-interest share in MRCT, %",
     conditional_p   = "Conditional probability (log scale)",
     unconditional_p = "Unconditional probability (log scale)",
     cond_p_red      = "Conditional probability (RR scale)",
     uncond_p_red    = "Unconditional probability (RR scale)",
     power_global    = "Power (global)",
-    power_cn        = "Power (subpopulation)",
+    power_region    = "Power (region of interest)",
     threshold       = "Consistency threshold",
     n_failed        = "Non-converged simulations"
 )
@@ -421,3 +466,4 @@ results %>%
     autofit(
 ) 
 ```
+
